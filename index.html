@@ -251,7 +251,7 @@ const OVERRIDES = {
   'way/48144344':  { color: 0xe8dcb4, roof: 0x5b5f63 },                 // Nový zámek
   'way/51844670':  { color: 0xf0eee6, tex: 'ribbon' },                  // Bývalý Baťa
   'way/51783913':  { color: 0xe9e4d6, tex: 'ribbon' },                  // Brouk a Babka (Pražská)
-  'way/197991615': { color: 0xe8e6e0, tex: 'glass' },                   // OD Forum Liberec
+  'way/197991615': { color: 0xe8e6e0, tex: 'glass', roof: 0x8f918e },                   // OD Forum Liberec
   'way/102590538': { color: 0xf2f8ff, tex: 'glass' },                   // S tower
   'way/47488668':  { color: 0xa7a9a8, tex: 'parking' },                 // Parkovací dům
   'way/1285563593':{ color: 0xa7a9a8, tex: 'parking' },                 // Parkovací dům (Švédská)
@@ -262,6 +262,7 @@ const OVERRIDES = {
   'way/48183365':  { color: 0xd6b890 }                                  // Felberova 3
 };
 const OLD   = [0xe3d7b5, 0xd9c9a0, 0xe6c9b0, 0xc9d3c1, 0xd7d2c4, 0xe0cfa8, 0xcdbfa9, 0xdcb8a6];
+const ROOFS = [0x9a4a36, 0xa8553a, 0x6b6e72, 0x7a3f30, 0xa8553a];   // červené tašky a šedá břidlice (podle leteckého snímku)
 const PANEL = [0xd8d6cd, 0xcfd3d0, 0xd9d2c0, 0xc9d0d6, 0xe0d8c8];
 
 function styleFor(p) {
@@ -270,15 +271,15 @@ function styleFor(p) {
   const flats = parseInt(p['building:flats']) || 0;
   const year = parseInt((p.start_date || '').slice(0, 4)) || 0;
   const modernUse = p.office || ['commercial', 'retail', 'civic'].includes(p.building);
-  let st = { tex: 'window', color: OLD[hs % OLD.length], roof: 0x8c4a38, lv: lv || 4 };
+  let st = { tex: 'window', color: OLD[hs % OLD.length], roof: ROOFS[(hs >> 3) % ROOFS.length], lv: lv || 4, pitched: true };
   if (p.building === 'garage') st = { tex: 'plain', color: 0xb4b2aa, roof: 0x77797b, lv: 1 };
   else if (p.building === 'industrial' && !lv) st = { tex: 'plain', color: 0xc4c0b6, roof: 0x77797b, lv: 1 };
   else if (p.amenity === 'parking') st = { tex: 'parking', color: 0xa7a9a8, roof: 0x77797b, lv: lv || 6 };
   else if (flats >= 20 && lv >= 5 && !p.heritage) st = { tex: 'panel', color: PANEL[hs % PANEL.length], roof: 0x77797b, lv };
   else if (year >= 2000 && modernUse) st = { tex: 'glass', color: 0xffffff, roof: 0x77797b, lv: lv || 4 };
   else if (year >= 2000) st = { tex: 'window', color: 0xe9e6df, roof: 0x77797b, lv: lv || 4 };
-  else if (p.heritage) st = { tex: 'window', color: OLD[hs % OLD.length], roof: 0x8c4a38, lv: lv || 4 };
-  else if (lv > 5) st.roof = 0x77797b;
+  else if (p.heritage) st = { tex: 'window', color: OLD[hs % OLD.length], roof: ROOFS[(hs >> 3) % ROOFS.length], lv: lv || 4, pitched: true };
+  else if (lv > 5) { st.roof = 0x77797b; st.pitched = false; }
   if (p.building === 'construction') st = { tex: 'plain', color: 0xc9c7c0, roof: 0x77797b, lv: 4 };
   const ov = OVERRIDES[p['@id']]; if (ov) Object.assign(st, ov);
   for (const [tag, key] of [['building:colour', 'color'], ['roof:colour', 'roof']]) {
@@ -290,6 +291,137 @@ function styleFor(p) {
 const wallMats = {}, roofMats = {};
 function wallMat(tex, color) { const k = tex + color; return wallMats[k] || (wallMats[k] = new THREE.MeshLambertMaterial({ map: TEX[tex], color })); }
 function roofMat(color) { return roofMats[color] || (roofMats[color] = new THREE.MeshLambertMaterial({ map: ROOFTEX, color })); }
+
+// ---------- šikmé (valbové) střechy ----------
+const roofMatsD = {};
+function roofMatD(color) { return roofMatsD[color] || (roofMatsD[color] = new THREE.MeshLambertMaterial({ map: ROOFTEX, color, side: THREE.DoubleSide })); }
+function polyArea(r) { let a = 0; for (let i = 0; i < r.length; i++) { const j = (i + 1) % r.length; a += r[i][0] * r[j][1] - r[j][0] * r[i][1]; } return Math.abs(a) / 2; }
+function obb(ring) {   // nejmenší otočený obdélník kolem půdorysu
+  let best = null;
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), c = Math.cos(ang), sn = Math.sin(ang);
+    let u0 = 1e9, u1 = -1e9, v0 = 1e9, v1 = -1e9;
+    for (const q of ring) { const u = q[0] * c + q[1] * sn, v = -q[0] * sn + q[1] * c; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); }
+    const ar = (u1 - u0) * (v1 - v0);
+    if (!best || ar < best.ar) best = { ar, ang, u0, u1, v0, v1 };
+  }
+  const c = Math.cos(best.ang), sn = Math.sin(best.ang), cu = (best.u0 + best.u1) / 2, cv = (best.v0 + best.v1) / 2;
+  let L = best.u1 - best.u0, W = best.v1 - best.v0, ang = best.ang;
+  if (W > L) { const t = L; L = W; W = t; ang += Math.PI / 2; }
+  return { cx: cu * c - cv * sn, cn: cu * sn + cv * c, ang, L, W, ar: best.ar };
+}
+function addPitchedRoof(ring, st, h) {
+  const o = obb(ring), area = polyArea(ring);
+  if (area < 35 || area > 700 || area / o.ar < 0.82 || ring.length > 14) return;   // jen skoro pravoúhlé domy
+  const L = o.L + 0.6, W = o.W + 0.6;
+  const rh = Math.min(o.W / 2 * 0.65, 4.5);
+  const hx = o.L / o.W < 1.15 ? 0 : o.L / 2 - o.W / 2;
+  const c = Math.cos(o.ang), sn = Math.sin(o.ang);
+  const T = (u, v, y) => [o.cx + u * c - v * sn, h + y, -(o.cn + u * sn + v * c)];
+  const A = T(-L / 2, -W / 2, 0), B = T(L / 2, -W / 2, 0), C = T(L / 2, W / 2, 0), D = T(-L / 2, W / 2, 0);
+  const R1 = T(-hx, 0, rh), R2 = T(hx, 0, rh);
+  const tris = [A, B, R2, A, R2, R1, C, D, R1, C, R1, R2, B, C, R2, D, A, R1];
+  const pos = new Float32Array(tris.length * 3), uv = new Float32Array(tris.length * 2);
+  tris.forEach((v, i) => { pos.set(v, i * 3); uv[i * 2] = v[0]; uv[i * 2 + 1] = v[2]; });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.computeVertexNormals();
+  scene.add(new THREE.Mesh(geo, roofMatD(st.roof)));
+}
+
+// ---------- terminál MHD (červená ocel + oblouková prosklená střecha, podle fotky) ----------
+function vaultGeo(L, W, Hv, y0, N) {
+  const pos = [], idx = [];
+  for (let k = 0; k <= N; k++) { const th = k / N * Math.PI, z = Math.cos(th) * W / 2, y = y0 + Math.sin(th) * Hv; pos.push(0, y, z, L, y, z); }
+  for (let k = 0; k < N; k++) { const a = k * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals();
+  return g;
+}
+function signTex() {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = '#f4f1ea'; g.fillRect(0, 0, 512, 64);
+  g.fillStyle = '#8c1d1a'; g.font = 'bold 46px Georgia'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('PŘEDPRODEJ', 256, 34);
+  return new THREE.CanvasTexture(c);
+}
+function addTerminal(f) {
+  const r = f.geometry.coordinates[0].slice(0, -1).map(P);   // [x, sever]
+  mapB.push(r.map(q => [q[0], -q[1]]));
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const s0 = mid(r[3], r[4]), e0 = mid(r[0], r[7]);
+  const L = Math.hypot(e0[0] - s0[0], e0[1] - s0[1]), ang = Math.atan2(e0[1] - s0[1], e0[0] - s0[0]);
+  const Wd = Math.max(Math.hypot(r[3][0] - r[4][0], r[3][1] - r[4][1]), 9);
+  const grp = new THREE.Group(); grp.position.set(s0[0], 0, -s0[1]); grp.rotation.y = ang;
+  const red = new THREE.MeshLambertMaterial({ color: 0xb3201f }), redD = new THREE.MeshLambertMaterial({ color: 0xb3201f, side: THREE.DoubleSide });
+  const grey = new THREE.MeshLambertMaterial({ color: 0x8a8479 });
+  const glass = new THREE.MeshLambertMaterial({ color: 0xe3eee6, transparent: true, opacity: 0.78, side: THREE.DoubleSide });
+  const post = new THREE.BoxGeometry(0.28, 4.4, 0.28);
+  for (let x = 1; x < L; x += 6) {
+    for (const z of [-Wd / 2, Wd / 2]) { const m = new THREE.Mesh(post, red); m.position.set(x, 2.2, z); grp.add(m); }
+    const rib = new THREE.Mesh(vaultGeo(0.25, Wd, 2.7, 4.5, 16), redD); rib.position.x = x - 0.12; grp.add(rib);
+  }
+  const slab = new THREE.Mesh(new THREE.BoxGeometry(L, 0.3, Wd), grey); slab.position.set(L / 2, 4.35, 0); grp.add(slab);
+  grp.add(new THREE.Mesh(vaultGeo(L, Wd, 2.7, 4.55, 18), glass));
+  const oz = -Wd / 2 + 1.3;   // pokladny
+  const off = new THREE.Mesh(new THREE.BoxGeometry(11, 3.4, 2.4), new THREE.MeshLambertMaterial({ color: 0xf1eee6 })); off.position.set(L * 0.4, 1.7, oz); grp.add(off);
+  const band = new THREE.Mesh(new THREE.BoxGeometry(11.04, 0.5, 2.44), red); band.position.set(L * 0.4, 3.15, oz); grp.add(band);
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(6.4, 0.8), new THREE.MeshBasicMaterial({ map: signTex() })); sign.position.set(L * 0.4, 3.15, oz + 1.23); grp.add(sign);
+  scene.add(grp);   // průchozí – bez kolize
+}
+
+// ---------- stromy a lampy (rozmístěné podél ulic podle leteckého snímku) ----------
+function addScenery() {
+  const rings = mapB.map(r => {
+    let a = 1e9, b = -1e9, c = 1e9, d = -1e9;
+    for (const q of r) { a = Math.min(a, q[0]); b = Math.max(b, q[0]); c = Math.min(c, q[1]); d = Math.max(d, q[1]); }
+    return { r, a, b, c, d };
+  });
+  const inB = (x, z) => rings.some(o => x >= o.a && x <= o.b && z >= o.c && z <= o.d && inPoly(x, z, o.r));
+  const walk = (names, step, off, out, minGap) => {
+    const carry = {}; let side = 1;
+    for (const [ax, az, bx, bz, name] of segs) {
+      if (!names.includes(name)) continue;
+      const dx = bx - ax, dz = bz - az, len = Math.hypot(dx, dz); if (len < 0.1) continue;
+      const nx = -dz / len, nz = dx / len;
+      let d = carry[name] != null ? carry[name] : step / 2;
+      while (d < len) {
+        const o = off + (hash(out.length + name) % 20) / 10;
+        const x = ax + dx / len * d + nx * o * side, z = az + dz / len * d + nz * o * side;
+        side = -side;
+        if (!inB(x, z) && !out.some(q => Math.hypot(q[0] - x, q[1] - z) < minGap)) out.push([x, z]);
+        d += step;
+      }
+      carry[name] = d - len;
+    }
+  };
+  const trees = [], lamps = [];
+  walk(['Revoluční', 'Soukenné náměstí', 'Moskevská'], 11, 4.2, trees, 4);
+  walk(['Fügnerova'], 26, 4.2, lamps, 10);
+
+  const crowns = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 1), new THREE.MeshLambertMaterial({ color: 0xffffff }), trees.length);
+  const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.14, 0.2, 1, 6), new THREE.MeshLambertMaterial({ color: 0x5a4634 }), trees.length);
+  const pal = [0x5f8a3c, 0x6f9a44, 0x9aa83a, 0xc98d2e, 0xb5651d, 0x7aa14a];
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), col = new THREE.Color();
+  trees.forEach((t, i) => {
+    const h = hash('t' + i), rr = 1.9 + (h % 7) / 10, th = 2.6;
+    m.compose(new THREE.Vector3(t[0], th / 2, t[1]), q, new THREE.Vector3(1, th, 1)); trunks.setMatrixAt(i, m);
+    m.compose(new THREE.Vector3(t[0], th + rr * 0.75, t[1]), q, new THREE.Vector3(rr, rr * 0.9, rr)); crowns.setMatrixAt(i, m);
+    crowns.setColorAt(i, col.setHex(pal[h % pal.length]));
+  });
+  scene.add(crowns, trunks);
+
+  const poles = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.05, 0.07, 1, 6), new THREE.MeshLambertMaterial({ color: 0x3a3d40 }), lamps.length);
+  const heads = new THREE.InstancedMesh(new THREE.BoxGeometry(0.8, 0.15, 0.3), new THREE.MeshLambertMaterial({ color: 0x2a2c2e }), lamps.length);
+  lamps.forEach((t, i) => {
+    m.compose(new THREE.Vector3(t[0], 2.5, t[1]), q, new THREE.Vector3(1, 5, 1)); poles.setMatrixAt(i, m);
+    m.compose(new THREE.Vector3(t[0], 5.05, t[1]), q, new THREE.Vector3(1, 1, 1)); heads.setMatrixAt(i, m);
+  });
+  scene.add(poles, heads);
+}
 
 function addBuilding(f) {
   const p = f.properties;
@@ -303,6 +435,7 @@ function addBuilding(f) {
   geo.rotateX(-Math.PI / 2);   // (x, sever) -> (x, nahoru, -sever)
   // skupina 0 = střecha/podlaha, skupina 1 = stěny
   scene.add(new THREE.Mesh(geo, [roofMat(st.roof), wallMat(st.tex, st.color)]));
+  if (st.pitched && st.lv <= 5) addPitchedRoof(ring, st, h);
   // kolize (OD Forum je průchozí – má pasáže, takže bez kolize)
   if (p.shop !== 'mall') {
     const xs = ring.map(q => q[0]), zs = ring.map(q => -q[1]);
@@ -328,7 +461,8 @@ function build(data) {
   for (const f of data.features) {
     const p = f.properties, g = f.geometry;
     if (g.type === 'Polygon') {
-      if (p.building) addBuilding(f);
+      if (p['@id'] === 'way/39486537') addTerminal(f);
+      else if (p.building) addBuilding(f);
       else if (p.highway === 'pedestrian') addFlatArea(f);
     } else if (g.type === 'LineString' && p.highway) {
       if (p.location === 'indoor' || p.tunnel || p.footway === 'crossing' && false) continue;
@@ -431,6 +565,7 @@ fetch('data.geojson')
   .then(d => {
     build(d);
     renderMapBase();
+    addScenery();
     ready = true;
     msg.textContent = 'Mapa je načtená.';
     document.getElementById('go').style.display = 'inline-block';
