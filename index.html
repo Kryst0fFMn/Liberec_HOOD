@@ -7,11 +7,12 @@
 <style>
   html,body{margin:0;height:100%;overflow:hidden;background:#b8c9d6;font-family:Georgia,"Times New Roman",serif}
   canvas{display:block}
-  #ov{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(28,36,44,.78);color:#f3efe6;text-align:center;cursor:pointer}
+  #ov{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(28,36,44,.78);z-index:10;color:#f3efe6;text-align:center;cursor:pointer}
   #ov div{max-width:30rem;padding:2rem;line-height:1.5}
   #ov h1{font-size:2.6rem;margin:0 0 .6rem;font-weight:normal;letter-spacing:.01em}
   #ov p{margin:.4rem 0}
   #ov .go{display:inline-block;margin-top:1rem;padding:.6rem 1.4rem;border:1px solid #f3efe6;border-radius:2px}
+  #mini{position:fixed;right:14px;bottom:14px;width:220px;height:220px;border-radius:50%;box-shadow:0 2px 10px rgba(0,0,0,.5);display:none;z-index:5;pointer-events:none}
   #hud{position:fixed;left:14px;top:12px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7);font-size:1rem;pointer-events:none}
   #cross{position:fixed;left:50%;top:50%;width:4px;height:4px;margin:-2px;border-radius:50%;background:#fff;opacity:.7;pointer-events:none}
 </style>
@@ -19,10 +20,11 @@
 <body>
 <div id="hud">Načítám mapu…</div>
 <div id="cross"></div>
+<canvas id="mini" width="440" height="440"></canvas>
 <div id="ov"><div>
   <h1>Fügnerka</h1>
   <p>Liberec, v měřítku 1:1. Data z OpenStreetMap.</p>
-  <p>W A S D – chůze &nbsp; Shift – rychleji &nbsp; myš – rozhlížení &nbsp; Esc – pauza</p>
+  <p>W A S D – chůze &nbsp; Shift – rychleji &nbsp; myš – rozhlížení &nbsp; Esc – pauza &nbsp; M – přiblížení mapy</p>
   <p id="msg">Načítám data…</p>
   <span class="go" id="go" style="display:none">Klikni a jdi</span>
 </div></div>
@@ -62,6 +64,7 @@ ground.rotation.x = -Math.PI / 2;
 scene.add(ground);
 
 // ---------- pomocné ----------
+const mapB = [], mapR = [], mapA = [];
 const colliders = [];   // {pts:[[x,z]...], minX,maxX,minZ,maxZ}
 const segs = [];        // pojmenované cesty pro HUD
 function hash(s) { let h = 0; for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); }
@@ -88,6 +91,7 @@ const ribbons = { road: [], ped: [], foot: [], fug: [] };
 
 function addRibbon(coords, kind, width, name) {
   const pts = coords.map(P);
+  mapR.push({ pts: pts.map(q => [q[0], -q[1]]), w: width, kind });
   for (let i = 0; i < pts.length - 1; i++) {
     const [ax, an] = pts[i], [bx, bn] = pts[i + 1];
     const dx = bx - ax, dn = bn - an, len = Math.hypot(dx, dn);
@@ -103,6 +107,12 @@ function addRibbon(coords, kind, width, name) {
 
 // ---------- fasády (textury kreslené v prohlížeči, 1 buňka = 3,2 m = 1 patro) ----------
 const MAXANI = renderer.capabilities.getMaxAnisotropy();
+function speckle(g, S, a) {
+  for (let i = 0; i < S * S / 6; i++) {
+    g.fillStyle = 'rgba(90,90,90,' + (a * Math.random()) + ')';
+    g.fillRect(Math.random() * S | 0, Math.random() * S | 0, 1, 1);
+  }
+}
 function makeTex(kind) {
   const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
   const g = c.getContext('2d');
@@ -110,7 +120,7 @@ function makeTex(kind) {
   if (kind === 'glass') {
     R('#8ea5b6', 0, 0, 1, 1); R('#d5dde3', 0, 0, 1, .04); R('#d5dde3', 0, 0, .03, 1); R('#a9bccb', .05, .05, .9, .4);
   } else {
-    R('#ffffff', 0, 0, 1, 1);
+    R('#ffffff', 0, 0, 1, 1); speckle(g, S, 0.22);
     if (kind === 'window') { R('#38465a', .3, .2, .4, .52); R('#d9d9d9', .28, .72, .44, .04); R('#cdd5dd', .495, .2, .01, .52); R('#e6e6e6', 0, 0, 1, .03); }
     if (kind === 'panel')  { R('#38465a', .12, .25, .3, .45); R('#38465a', .58, .25, .3, .45); R('#dcdcdc', 0, 0, 1, .04); R('#dcdcdc', 0, 0, .03, 1); }
     if (kind === 'ribbon') { R('#38465a', 0, .18, 1, .5); R('#e4e8ec', .24, .18, .015, .5); R('#e4e8ec', .5, .18, .015, .5); R('#e4e8ec', .75, .18, .015, .5); }
@@ -125,6 +135,111 @@ function makeTex(kind) {
 }
 const TEX = {};
 ['window', 'glass', 'panel', 'ribbon', 'parking', 'plain'].forEach(k => TEX[k] = makeTex(k));
+
+// ---------- textury cest a země (UV jsou v metrech, tile = velikost dlaždice v metrech) ----------
+function makeGTex(kind, tile) {
+  const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d'), rnd = Math.random;
+  const grain = (base, amp) => {
+    g.fillStyle = base; g.fillRect(0, 0, S, S);
+    const im = g.getImageData(0, 0, S, S), d = im.data;
+    for (let i = 0; i < d.length; i += 4) { const v = (rnd() - .5) * amp; d[i] += v; d[i + 1] += v; d[i + 2] += v; }
+    g.putImageData(im, 0, 0);
+  };
+  if (kind === 'road') {
+    grain('#5b5e63', 34);
+    for (let i = 0; i < 50; i++) { g.fillStyle = 'rgba(30,30,30,.25)'; g.fillRect(rnd() * S, rnd() * S, 2 + rnd() * 3, 1 + rnd() * 2); }
+  } else if (kind === 'ped' || kind === 'foot') {
+    const n = 4, cs = S / n;
+    grain(kind === 'ped' ? '#d2c9b8' : '#bdb6a8', 14);
+    for (let r = 0; r < n; r++) for (let q = 0; q < n; q++) {
+      g.fillStyle = 'rgba(' + (rnd() < .5 ? '0,0,0' : '255,255,255') + ',' + (.04 + rnd() * .08) + ')';
+      g.fillRect(q * cs, r * cs, cs, cs);
+    }
+    g.strokeStyle = 'rgba(60,55,45,.55)'; g.lineWidth = 2; g.beginPath();
+    for (let i = 0; i <= n; i++) { g.moveTo(i * cs, 0); g.lineTo(i * cs, S); g.moveTo(0, i * cs); g.lineTo(S, i * cs); }
+    g.stroke();
+  } else if (kind === 'fug') {   // žulová kostka
+    grain('#6f685d', 20);
+    const n = 8, cs = S / n;
+    for (let r = 0; r < n; r++) for (let q = 0; q < n; q++) {
+      const t = 110 + rnd() * 70 | 0;
+      g.fillStyle = 'rgb(' + (t + 14) + ',' + t + ',' + (t - 14) + ')';
+      g.beginPath(); g.ellipse((q + .5) * cs, (r + .5) * cs, cs * .46, cs * .4, 0, 0, Math.PI * 2); g.fill();
+    }
+  } else {   // zem
+    grain('#8d9a84', 30);
+    for (let i = 0; i < 120; i++) { g.fillStyle = 'rgba(190,205,170,.35)'; g.fillRect(rnd() * S, rnd() * S, 1, 2 + rnd() * 3); }
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / tile, 1 / tile); t.anisotropy = MAXANI;
+  return t;
+}
+const GTEX = { road: makeGTex('road', 4), ped: makeGTex('ped', 2), foot: makeGTex('foot', 1.6), fug: makeGTex('fug', 1.6), ground: makeGTex('ground', 6) };
+GTEX.ground.repeat.set(4000 / 6, 4000 / 6);   // země je jedna velká plocha s UV 0..1
+ground.material = new THREE.MeshLambertMaterial({ map: GTEX.ground });
+
+// střešní krytina (UV střech jsou v metrech, tile 2 m)
+const ROOFTEX = (() => {
+  const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, S, S);
+  for (let r = 0; r < 8; r++) {
+    g.fillStyle = 'rgba(0,0,0,.2)'; g.fillRect(0, r * 16, S, 2);
+    for (let k = 0; k < 4; k++) g.fillRect((r % 2) * 16 + k * 32, r * 16, 1, 16);
+  }
+  speckle(g, S, 0.3);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / 2, 1 / 2); t.anisotropy = MAXANI;
+  return t;
+})();
+
+// ---------- minimapa ----------
+const mini = document.getElementById('mini'), mg = mini.getContext('2d');
+const BASE = 1.5, ZOOMS = [1.2, 0.45];   // px na metr (mapa je kreslená 2× kvůli ostrosti)
+let zoomI = 0, mapBase = null, MB = { minX: 0, minZ: 0 };
+function renderMapBase() {
+  let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
+  const grow = pts => { for (const q of pts) { minX = Math.min(minX, q[0]); maxX = Math.max(maxX, q[0]); minZ = Math.min(minZ, q[1]); maxZ = Math.max(maxZ, q[1]); } };
+  mapB.forEach(grow); mapR.forEach(r => grow(r.pts));
+  minX -= 30; minZ -= 30; maxX += 30; maxZ += 30;
+  const W = Math.ceil((maxX - minX) * BASE), H = Math.ceil((maxZ - minZ) * BASE);
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  g.fillStyle = '#dedbd0'; g.fillRect(0, 0, W, H);
+  const T = q => [(q[0] - minX) * BASE, (q[1] - minZ) * BASE];
+  const path = (pts, close) => { g.beginPath(); pts.forEach((q, i) => { const [x, y] = T(q); i ? g.lineTo(x, y) : g.moveTo(x, y); }); if (close) g.closePath(); };
+  g.fillStyle = '#d3cab8'; mapA.forEach(a => { path(a, true); g.fill(); });
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  const col = { road: ['#ffffff', '#b5b1a6'], ped: ['#f1ead9', '#c9c0ad'], foot: ['#e9e3d3', '#cfc8b7'], fug: ['#f4c27a', '#c98f3f'] };
+  for (const pass of [0, 1]) for (const k of ['foot', 'road', 'ped', 'fug']) for (const r of mapR) {
+    if (r.kind !== k) continue;
+    path(r.pts, false);
+    g.strokeStyle = col[k][pass === 0 ? 1 : 0];
+    g.lineWidth = pass === 0 ? Math.max(r.w * BASE + 3, 4) : Math.max(r.w * BASE, 2);
+    g.stroke();
+  }
+  g.fillStyle = '#b4ae9f'; g.strokeStyle = '#8b857a'; g.lineWidth = 1;
+  mapB.forEach(b => { path(b, true); g.fill(); g.stroke(); });
+  mapBase = c; MB = { minX, minZ };
+  mini.style.display = 'block';
+}
+function drawMap() {
+  const S = mini.width, R = S / 2, k = ZOOMS[zoomI] * 2 / BASE;
+  mg.clearRect(0, 0, S, S);
+  mg.save();
+  mg.beginPath(); mg.arc(R, R, R - 3, 0, Math.PI * 2); mg.clip();
+  mg.fillStyle = '#dedbd0'; mg.fillRect(0, 0, S, S);
+  mg.translate(R, R); mg.rotate(yaw); mg.scale(k, k);   // směr pohledu je vždy nahoru
+  mg.translate(-(player.x - MB.minX) * BASE, -(player.z - MB.minZ) * BASE);
+  mg.drawImage(mapBase, 0, 0);
+  mg.restore();
+  mg.strokeStyle = '#fff'; mg.lineWidth = 6; mg.beginPath(); mg.arc(R, R, R - 3, 0, Math.PI * 2); mg.stroke();
+  mg.fillStyle = '#e8472b'; mg.strokeStyle = '#fff'; mg.lineWidth = 3;
+  mg.beginPath(); mg.moveTo(R, R - 26); mg.lineTo(R - 17, R + 20); mg.lineTo(R, R + 10); mg.lineTo(R + 17, R + 20); mg.closePath(); mg.fill(); mg.stroke();
+  mg.fillStyle = '#2b2b2b'; mg.font = 'bold 30px Georgia'; mg.textAlign = 'center'; mg.textBaseline = 'middle';
+  mg.fillText('S', R + Math.sin(yaw) * (R - 30), R - Math.cos(yaw) * (R - 30));
+}
 
 // ---------- BARVY BUDOV ----------
 // Data z OpenStreetMap barvy nemají, proto jsou odhadnuté podle typu domu.
@@ -174,13 +289,14 @@ function styleFor(p) {
 
 const wallMats = {}, roofMats = {};
 function wallMat(tex, color) { const k = tex + color; return wallMats[k] || (wallMats[k] = new THREE.MeshLambertMaterial({ map: TEX[tex], color })); }
-function roofMat(color) { return roofMats[color] || (roofMats[color] = new THREE.MeshLambertMaterial({ color })); }
+function roofMat(color) { return roofMats[color] || (roofMats[color] = new THREE.MeshLambertMaterial({ map: ROOFTEX, color })); }
 
 function addBuilding(f) {
   const p = f.properties;
   const ring = f.geometry.coordinates[0].slice(0, -1).map(P);
   if (ring.length < 3) return;
   const st = styleFor(p);
+  mapB.push(ring.map(q => [q[0], -q[1]]));
   const h = st.lv * 3.2;   // 1 patro = 3,2 m = 1 řada oken
   const shape = new THREE.Shape(ring.map(q => new THREE.Vector2(q[0], q[1])));
   const geo = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false });
@@ -200,9 +316,10 @@ function addBuilding(f) {
 function addFlatArea(f) {
   const ring = f.geometry.coordinates[0].slice(0, -1).map(P);
   if (ring.length < 3) return;
+  mapA.push(ring.map(q => [q[0], -q[1]]));
   const geo = new THREE.ShapeGeometry(new THREE.Shape(ring.map(q => new THREE.Vector2(q[0], q[1]))));
   geo.rotateX(-Math.PI / 2);
-  const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0xc9bfae, side: THREE.DoubleSide }));
+  const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: GTEX.ped, side: THREE.DoubleSide }));
   m.position.y = 0.04;
   scene.add(m);
 }
@@ -230,7 +347,10 @@ function build(data) {
     for (let i = 1; i < nrm.length; i += 3) nrm[i] = 1;
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
-    scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: STYLE[k].color, side: THREE.DoubleSide })));
+    const uv = new Float32Array(pos.length / 3 * 2);
+    for (let i = 0, j = 0; i < pos.length; i += 3, j += 2) { uv[j] = pos[i]; uv[j + 1] = pos[i + 2]; }   // UV v metrech
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: GTEX[k], side: THREE.DoubleSide })));
   }
 }
 
@@ -240,7 +360,7 @@ const start = P([15.05712, 50.76578]);
 const player = { x: start[0], z: -start[1] };
 let yaw = 0.83, pitch = 0;
 const keys = {};
-addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'KeyM') zoomI = (zoomI + 1) % ZOOMS.length; });
 addEventListener('keyup', e => { keys[e.code] = false; });
 
 function blockedAt(x, z) {
@@ -297,6 +417,7 @@ function loop(t) {
     }
     updateStreet(t);
   }
+  if (ready && mapBase) drawMap();
   camera.position.set(player.x, EYE, player.z);
   camera.rotation.set(pitch, yaw, 0, 'YXZ');
   renderer.render(scene, camera);
@@ -309,6 +430,7 @@ fetch('data.geojson')
   .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
   .then(d => {
     build(d);
+    renderMapBase();
     ready = true;
     msg.textContent = 'Mapa je načtená.';
     document.getElementById('go').style.display = 'inline-block';
