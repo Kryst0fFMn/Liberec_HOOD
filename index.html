@@ -65,6 +65,7 @@ scene.add(ground);
 
 // ---------- pomocné ----------
 const mapB = [], mapR = [], mapA = [];
+const passages = [];   // venkovní průchody pod budovami [ax,az,bx,bz]
 const colliders = [];   // {pts:[[x,z]...], minX,maxX,minZ,maxZ}
 const segs = [];        // pojmenované cesty pro HUD
 function hash(s) { let h = 0; for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); }
@@ -105,94 +106,122 @@ function addRibbon(coords, kind, width, name) {
   }
 }
 
-// ---------- fasády (textury kreslené v prohlížeči, 1 buňka = 3,2 m = 1 patro) ----------
+// ---------- textury: barva + reliéf (bump) kreslené v prohlížeči ----------
 const MAXANI = renderer.capabilities.getMaxAnisotropy();
-function speckle(g, S, a) {
-  for (let i = 0; i < S * S / 6; i++) {
-    g.fillStyle = 'rgba(90,90,90,' + (a * Math.random()) + ')';
-    g.fillRect(Math.random() * S | 0, Math.random() * S | 0, 1, 1);
-  }
+function rng(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function helpers(g, S, bump, rnd) {
+  const gray = v => 'rgb(' + v + ',' + v + ',' + v + ')';
+  return {
+    gray,
+    R: (c, v, x, y, w, h) => { g.fillStyle = bump ? gray(v) : c; g.fillRect(x * S, y * S, w * S, h * S); },
+    grain: amp => { const im = g.getImageData(0, 0, S, S), d = im.data; for (let i = 0; i < d.length; i += 4) { const v = (rnd() - .5) * amp; d[i] += v; d[i + 1] += v; d[i + 2] += v; } g.putImageData(im, 0, 0); }
+  };
 }
-function makeTex(kind) {
-  const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
-  const g = c.getContext('2d');
-  const R = (col, x, y, w, h) => { g.fillStyle = col; g.fillRect(x * S, y * S, w * S, h * S); };
-  if (kind === 'glass') {
-    R('#8ea5b6', 0, 0, 1, 1); R('#d5dde3', 0, 0, 1, .04); R('#d5dde3', 0, 0, .03, 1); R('#a9bccb', .05, .05, .9, .4);
-  } else {
-    R('#ffffff', 0, 0, 1, 1); speckle(g, S, 0.22);
-    if (kind === 'window') { R('#38465a', .3, .2, .4, .52); R('#d9d9d9', .28, .72, .44, .04); R('#cdd5dd', .495, .2, .01, .52); R('#e6e6e6', 0, 0, 1, .03); }
-    if (kind === 'panel')  { R('#38465a', .12, .25, .3, .45); R('#38465a', .58, .25, .3, .45); R('#dcdcdc', 0, 0, 1, .04); R('#dcdcdc', 0, 0, .03, 1); }
-    if (kind === 'ribbon') { R('#38465a', 0, .18, 1, .5); R('#e4e8ec', .24, .18, .015, .5); R('#e4e8ec', .5, .18, .015, .5); R('#e4e8ec', .75, .18, .015, .5); }
-    if (kind === 'parking'){ R('#4a4d50', 0, .35, 1, .3); R('#e0e0e0', 0, 0, 1, .03); }
-    if (kind === 'plain')  { R('#e4e4e4', 0, 0, 1, .02); R('#f0f0f0', 0, 0, .02, 1); }
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(1 / 3.2, -1 / 3.2); t.offset.set(0, 1 / 3.2);   // UV stěn jsou v metrech
-  t.anisotropy = MAXANI;
-  return t;
+function pair(S, draw, seed) {   // vrací {map: barevná textura, bump: reliéfní textura}
+  const mk = bump => { const c = document.createElement('canvas'); c.width = c.height = S; draw(c.getContext('2d'), S, bump, rng(seed)); return c; };
+  const tex = c => { const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = MAXANI; return t; };
+  return { map: tex(mk(false)), bump: tex(mk(true)) };
+}
+
+// fasády: 1 buňka = 3,2 m na šířku × výška patra
+function facadeDraw(kind) {
+  return (g, S, bump, rnd) => {
+    const { R, grain } = helpers(g, S, bump, rnd);
+    if (kind === 'glass') {
+      R('#7f98ab', 110, 0, 0, 1, 1);
+      R('#a3b9c9', 120, .04, .05, .92, .42); R('#6f879a', 100, .04, .52, .92, .43);
+      R('#dfe5ea', 190, 0, 0, 1, .05); R('#dfe5ea', 190, 0, 0, .04, 1); R('#dfe5ea', 190, .5, 0, .02, 1);
+    } else if (kind === 'mall') {   // velké prosklené pole s rámy (nákupní centra)
+      R('#ffffff', 150, 0, 0, 1, 1); grain(bump ? 10 : 14);
+      R('#dfe3e6', 185, .04, .14, .92, .66);
+      R('#5d7487', 70, .06, .17, .88, .6); R('#a9bccb', 80, .06, .17, .88, .18);
+      R('#e9edf0', 195, .335, .17, .015, .6); R('#e9edf0', 195, .665, .17, .015, .6); R('#e9edf0', 195, .06, .45, .88, .015);
+      R('#d4d4d0', 160, 0, .96, 1, .04);
+    } else {
+      R('#ffffff', 140, 0, 0, 1, 1); grain(bump ? 16 : 22);
+      if (kind === 'window') {
+        R('#f4f4f4', 190, .26, .17, .48, .6);      // rám okna (předsazený)
+        R('#38465a', 60, .3, .21, .4, .52);        // sklo (zapuštěné)
+        R('#f1f1f1', 200, .495, .21, .012, .52); R('#f1f1f1', 200, .3, .45, .4, .012);
+        R('#ececec', 210, .24, .77, .52, .04);     // parapet
+        R('#ececec', 180, .25, .13, .5, .04);      // nadokenní římsa
+        R('#dedede', 160, 0, .965, 1, .035);       // pásek mezi patry
+      } else if (kind === 'panel') {
+        R('#f0f0f0', 185, .08, .2, .34, .5); R('#f0f0f0', 185, .56, .2, .34, .5);
+        R('#38465a', 60, .1, .22, .3, .46); R('#38465a', 60, .58, .22, .3, .46);
+        R('#c4c4c4', 205, .04, .72, .92, .1);      // balkonové zábradlí
+        R('#d0d0d0', 90, 0, .96, 1, .04); R('#d6d6d6', 100, 0, 0, .025, 1);   // spáry panelů
+      } else if (kind === 'ribbon') {
+        R('#38465a', 60, 0, .16, 1, .52);
+        R('#f0f0f0', 190, 0, .12, 1, .04); R('#f0f0f0', 190, 0, .68, 1, .04);
+        R('#eceff2', 200, .25, .16, .015, .52); R('#eceff2', 200, .5, .16, .015, .52); R('#eceff2', 200, .75, .16, .015, .52);
+        R('#e4e4e4', 150, 0, .72, 1, .28);
+      } else if (kind === 'parking') {
+        R('#4a4d50', 40, 0, .3, 1, .34); R('#c8c8c8', 190, 0, .3, 1, .03);
+        R('#d8d8d8', 170, 0, .92, 1, .08); R('#dcdcdc', 180, 0, 0, .06, 1);
+      } else {   // plain
+        R('#d8d8d8', 90, 0, 0, 1, .015); R('#d8d8d8', 90, 0, 0, .015, 1);
+      }
+    }
+  };
 }
 const TEX = {};
-['window', 'glass', 'panel', 'ribbon', 'parking', 'plain'].forEach(k => TEX[k] = makeTex(k));
+['window', 'glass', 'panel', 'ribbon', 'parking', 'plain', 'mall'].forEach((k, i) => {
+  TEX[k] = pair(256, facadeDraw(k), 10 + i);
+  TEX[k].map.repeat.set(1 / 3.2, -1 / 3.2); TEX[k].map.offset.set(0, 1 / 3.2);   // UV stěn jsou v metrech
+});
 
-// ---------- textury cest a země (UV jsou v metrech, tile = velikost dlaždice v metrech) ----------
-function makeGTex(kind, tile) {
-  const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
-  const g = c.getContext('2d'), rnd = Math.random;
-  const grain = (base, amp) => {
-    g.fillStyle = base; g.fillRect(0, 0, S, S);
-    const im = g.getImageData(0, 0, S, S), d = im.data;
-    for (let i = 0; i < d.length; i += 4) { const v = (rnd() - .5) * amp; d[i] += v; d[i + 1] += v; d[i + 2] += v; }
-    g.putImageData(im, 0, 0);
+// cesty a zem (UV v metrech, tile = velikost dlaždice v metrech)
+function groundDraw(kind) {
+  return (g, S, bump, rnd) => {
+    const { R, grain, gray } = helpers(g, S, bump, rnd);
+    if (kind === 'road') {
+      R('#5b5e63', 120, 0, 0, 1, 1); grain(bump ? 60 : 34);
+      for (let i = 0; i < 70; i++) { g.fillStyle = bump ? gray(70) : 'rgba(30,30,30,.3)'; g.fillRect(rnd() * S, rnd() * S, 2 + rnd() * 3, 1 + rnd() * 2); }
+      for (let i = 0; i < 110; i++) { g.fillStyle = bump ? gray(200) : 'rgba(160,160,160,.35)'; g.fillRect(rnd() * S, rnd() * S, 2, 2); }
+    } else if (kind === 'ped' || kind === 'foot') {
+      const n = 4, cs = S / n;
+      R(kind === 'ped' ? '#d2c9b8' : '#bdb6a8', 150, 0, 0, 1, 1); grain(bump ? 18 : 14);
+      for (let r = 0; r < n; r++) for (let q = 0; q < n; q++) {
+        const t = rnd();
+        g.fillStyle = bump ? gray(140 + t * 40 | 0) : 'rgba(' + (t < .5 ? '0,0,0' : '255,255,255') + ',' + (.04 + t * .08) + ')';
+        g.fillRect(q * cs + 2, r * cs + 2, cs - 4, cs - 4);
+      }
+      g.strokeStyle = bump ? gray(25) : 'rgba(60,55,45,.6)'; g.lineWidth = 4; g.beginPath();
+      for (let i = 0; i <= n; i++) { g.moveTo(i * cs, 0); g.lineTo(i * cs, S); g.moveTo(0, i * cs); g.lineTo(S, i * cs); }
+      g.stroke();
+    } else if (kind === 'fug') {   // žulová kostka
+      R('#5d574d', 20, 0, 0, 1, 1);
+      const n = 8, cs = S / n;
+      for (let r = 0; r < n; r++) for (let q = 0; q < n; q++) {
+        const t = 110 + rnd() * 70 | 0, jx = (rnd() - .5) * cs * .12, jy = (rnd() - .5) * cs * .12;
+        g.fillStyle = bump ? gray(200) : 'rgb(' + (t + 14) + ',' + t + ',' + (t - 14) + ')';
+        g.beginPath(); g.ellipse((q + .5) * cs + jx, (r + .5) * cs + jy, cs * .47, cs * .41, 0, 0, Math.PI * 2); g.fill();
+        if (bump) { g.fillStyle = gray(255); g.beginPath(); g.ellipse((q + .5) * cs + jx, (r + .5) * cs + jy, cs * .28, cs * .24, 0, 0, Math.PI * 2); g.fill(); }
+      }
+    } else {   // zem
+      R('#8d9a84', 120, 0, 0, 1, 1); grain(bump ? 50 : 30);
+      for (let i = 0; i < 160; i++) { g.fillStyle = bump ? gray(180) : 'rgba(190,205,170,.35)'; g.fillRect(rnd() * S, rnd() * S, 1, 2 + rnd() * 3); }
+    }
   };
-  if (kind === 'road') {
-    grain('#5b5e63', 34);
-    for (let i = 0; i < 50; i++) { g.fillStyle = 'rgba(30,30,30,.25)'; g.fillRect(rnd() * S, rnd() * S, 2 + rnd() * 3, 1 + rnd() * 2); }
-  } else if (kind === 'ped' || kind === 'foot') {
-    const n = 4, cs = S / n;
-    grain(kind === 'ped' ? '#d2c9b8' : '#bdb6a8', 14);
-    for (let r = 0; r < n; r++) for (let q = 0; q < n; q++) {
-      g.fillStyle = 'rgba(' + (rnd() < .5 ? '0,0,0' : '255,255,255') + ',' + (.04 + rnd() * .08) + ')';
-      g.fillRect(q * cs, r * cs, cs, cs);
-    }
-    g.strokeStyle = 'rgba(60,55,45,.55)'; g.lineWidth = 2; g.beginPath();
-    for (let i = 0; i <= n; i++) { g.moveTo(i * cs, 0); g.lineTo(i * cs, S); g.moveTo(0, i * cs); g.lineTo(S, i * cs); }
-    g.stroke();
-  } else if (kind === 'fug') {   // žulová kostka
-    grain('#6f685d', 20);
-    const n = 8, cs = S / n;
-    for (let r = 0; r < n; r++) for (let q = 0; q < n; q++) {
-      const t = 110 + rnd() * 70 | 0;
-      g.fillStyle = 'rgb(' + (t + 14) + ',' + t + ',' + (t - 14) + ')';
-      g.beginPath(); g.ellipse((q + .5) * cs, (r + .5) * cs, cs * .46, cs * .4, 0, 0, Math.PI * 2); g.fill();
-    }
-  } else {   // zem
-    grain('#8d9a84', 30);
-    for (let i = 0; i < 120; i++) { g.fillStyle = 'rgba(190,205,170,.35)'; g.fillRect(rnd() * S, rnd() * S, 1, 2 + rnd() * 3); }
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / tile, 1 / tile); t.anisotropy = MAXANI;
-  return t;
 }
-const GTEX = { road: makeGTex('road', 4), ped: makeGTex('ped', 2), foot: makeGTex('foot', 1.6), fug: makeGTex('fug', 1.6), ground: makeGTex('ground', 6) };
-GTEX.ground.repeat.set(4000 / 6, 4000 / 6);   // země je jedna velká plocha s UV 0..1
-ground.material = new THREE.MeshLambertMaterial({ map: GTEX.ground });
+const GTEX = {}, TILE = { road: 4, ped: 2, foot: 1.6, fug: 1.6, ground: 6 };
+Object.keys(TILE).forEach((k, i) => { GTEX[k] = pair(256, groundDraw(k), 50 + i); GTEX[k].map.repeat.set(1 / TILE[k], 1 / TILE[k]); });
+GTEX.ground.map.repeat.set(4000 / 6, 4000 / 6);   // země je jedna velká plocha s UV 0..1
+ground.material = new THREE.MeshPhongMaterial({ map: GTEX.ground.map, bumpMap: GTEX.ground.bump, bumpScale: 1, specular: 0x000000, shininess: 1 });
+const BS = { road: 1.3, ped: 1.6, foot: 1.6, fug: 3.2 };
+function groundMat(k) { return new THREE.MeshPhongMaterial({ map: GTEX[k].map, bumpMap: GTEX[k].bump, bumpScale: BS[k], side: THREE.DoubleSide, specular: 0x111111, shininess: 4 }); }
 
 // střešní krytina (UV střech jsou v metrech, tile 2 m)
-const ROOFTEX = (() => {
-  const S = 128, c = document.createElement('canvas'); c.width = c.height = S;
-  const g = c.getContext('2d');
-  g.fillStyle = '#fff'; g.fillRect(0, 0, S, S);
+const ROOFTEX = pair(128, (g, S, bump, rnd) => {
+  const { R, grain } = helpers(g, S, bump, rnd);
+  R('#ffffff', 150, 0, 0, 1, 1); grain(bump ? 20 : 26);
   for (let r = 0; r < 8; r++) {
-    g.fillStyle = 'rgba(0,0,0,.2)'; g.fillRect(0, r * 16, S, 2);
-    for (let k = 0; k < 4; k++) g.fillRect((r % 2) * 16 + k * 32, r * 16, 1, 16);
+    R('#c9c9c9', 50, 0, r / 8, 1, .022);
+    for (let k = 0; k < 4; k++) R('#d2d2d2', 70, (r % 2) * .125 + k * .25, r / 8, .006, .125);
   }
-  speckle(g, S, 0.3);
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / 2, 1 / 2); t.anisotropy = MAXANI;
-  return t;
-})();
+}, 7);
+ROOFTEX.map.repeat.set(1 / 2, 1 / 2);
 
 // ---------- minimapa ----------
 const mini = document.getElementById('mini'), mg = mini.getContext('2d');
@@ -244,20 +273,22 @@ function drawMap() {
 // ---------- BARVY BUDOV ----------
 // Data z OpenStreetMap barvy nemají, proto jsou odhadnuté podle typu domu.
 // Konkrétní dům přebarvíš tady: najdi jeho číslo (např. way/47488662 – klikni na budovu na openstreetmap.org),
-// přidej řádek. color = barva fasády, roof = barva střechy, tex = window | glass | panel | ribbon | parking | plain,
+// přidej řádek. color = barva fasády, roof = barva střechy, tex = window | glass | mall | panel | ribbon | parking | plain,
+// fh = výška jednoho patra v metrech,
 // lv = počet pater.
 const OVERRIDES = {
-  'way/47488662':  { color: 0xe6d9a8, roof: 0x5b5f63 },                 // Liberecký zámek
-  'way/48144344':  { color: 0xe8dcb4, roof: 0x5b5f63 },                 // Nový zámek
+  'way/47488678':  { color: 0xe6e3da, tex: 'mall', lv: 3, fh: 4.2 },   // OC LBC
+  'way/47488662':  { color: 0xe6d9a8, roof: 0x5b5f63, lv: 3, fh: 4.5 },                 // Liberecký zámek
+  'way/48144344':  { color: 0xe8dcb4, roof: 0x5b5f63, lv: 3, fh: 4 },                 // Nový zámek
   'way/51844670':  { color: 0xf0eee6, tex: 'ribbon' },                  // Bývalý Baťa
   'way/51783913':  { color: 0xe9e4d6, tex: 'ribbon' },                  // Brouk a Babka (Pražská)
-  'way/197991615': { color: 0xe8e6e0, tex: 'glass', roof: 0x8f918e },                   // OD Forum Liberec
-  'way/102590538': { color: 0xf2f8ff, tex: 'glass' },                   // S tower
+  'way/197991615': { color: 0xe8e6e0, tex: 'mall', roof: 0x8f918e, lv: 4, fh: 5 },                   // OD Forum Liberec
+  'way/102590538': { color: 0xf2f8ff, tex: 'glass', fh: 3.4 },                   // S tower
   'way/47488668':  { color: 0xa7a9a8, tex: 'parking' },                 // Parkovací dům
   'way/1285563593':{ color: 0xa7a9a8, tex: 'parking' },                 // Parkovací dům (Švédská)
   'way/84270541':  { color: 0xd6d3c8, tex: 'panel' },                   // Nisa
   'way/478696413': { color: 0xd6d3c8, tex: 'panel' },                   // Nisa
-  'way/41188088':  { color: 0xd3cdbf },                                 // Dům kultury
+  'way/41188088':  { color: 0xd3cdbf, lv: 3, fh: 4.5 },                                 // Dům kultury
   'way/197991686': { color: 0xd7c08e },                                 // Annahof
   'way/48183365':  { color: 0xd6b890 }                                  // Felberova 3
 };
@@ -281,6 +312,13 @@ function styleFor(p) {
   else if (p.heritage) st = { tex: 'window', color: OLD[hs % OLD.length], roof: ROOFS[(hs >> 3) % ROOFS.length], lv: lv || 4, pitched: true };
   else if (lv > 5) { st.roof = 0x77797b; st.pitched = false; }
   if (p.building === 'construction') st = { tex: 'plain', color: 0xc9c7c0, roof: 0x77797b, lv: 4 };
+  if (st.fh == null) {   // výška patra podle typu domu
+    if (st.tex === 'parking' || p.building === 'garage') st.fh = 3;
+    else if (st.tex === 'panel') st.fh = 3;
+    else if (['retail', 'commercial'].includes(p.building) || p.office || p.shop) st.fh = 4.2;
+    else if (p.building === 'civic') st.fh = 3.8;
+    else st.fh = 3.2;
+  }
   const ov = OVERRIDES[p['@id']]; if (ov) Object.assign(st, ov);
   for (const [tag, key] of [['building:colour', 'color'], ['roof:colour', 'roof']]) {
     if (p[tag]) { try { st[key] = new THREE.Color(p[tag]).getHex(); } catch (e) {} }
@@ -289,12 +327,17 @@ function styleFor(p) {
 }
 
 const wallMats = {}, roofMats = {};
-function wallMat(tex, color) { const k = tex + color; return wallMats[k] || (wallMats[k] = new THREE.MeshLambertMaterial({ map: TEX[tex], color })); }
-function roofMat(color) { return roofMats[color] || (roofMats[color] = new THREE.MeshLambertMaterial({ map: ROOFTEX, color })); }
+function wallMat(tex, color, fh) {   // textura se přizpůsobí výšce patra (fh), aby okna seděla na patra
+  const k = tex + color + fh; if (wallMats[k]) return wallMats[k];
+  const t = TEX[tex], m = t.map.clone(); m.needsUpdate = true; m.anisotropy = MAXANI;
+  m.repeat.set(1 / 3.2, -1 / fh); m.offset.set(0, 1 / fh);
+  return wallMats[k] = new THREE.MeshPhongMaterial({ map: m, bumpMap: t.bump, bumpScale: 2, color, specular: 0x111111, shininess: 6 });
+}
+function roofMat(color) { return roofMats[color] || (roofMats[color] = new THREE.MeshPhongMaterial({ map: ROOFTEX.map, bumpMap: ROOFTEX.bump, bumpScale: 2, color, specular: 0x111111, shininess: 4 })); }
 
 // ---------- šikmé (valbové) střechy ----------
 const roofMatsD = {};
-function roofMatD(color) { return roofMatsD[color] || (roofMatsD[color] = new THREE.MeshLambertMaterial({ map: ROOFTEX, color, side: THREE.DoubleSide })); }
+function roofMatD(color) { return roofMatsD[color] || (roofMatsD[color] = new THREE.MeshPhongMaterial({ map: ROOFTEX.map, bumpMap: ROOFTEX.bump, bumpScale: 2, color, side: THREE.DoubleSide, specular: 0x111111, shininess: 4 })); }
 function polyArea(r) { let a = 0; for (let i = 0; i < r.length; i++) { const j = (i + 1) % r.length; a += r[i][0] * r[j][1] - r[j][0] * r[i][1]; } return Math.abs(a) / 2; }
 function obb(ring) {   // nejmenší otočený obdélník kolem půdorysu
   let best = null;
@@ -429,21 +472,20 @@ function addBuilding(f) {
   if (ring.length < 3) return;
   const st = styleFor(p);
   mapB.push(ring.map(q => [q[0], -q[1]]));
-  const h = st.lv * 3.2;   // 1 patro = 3,2 m = 1 řada oken
+  let h = st.lv * st.fh;   // počet pater × výška patra
+  if (st.tex !== 'parking' && p.building !== 'garage' && polyArea(ring) >= 60) h = Math.max(h, 6.5);   // žádné „krabičky“ nižší než 2 patra
   const shape = new THREE.Shape(ring.map(q => new THREE.Vector2(q[0], q[1])));
   const geo = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false });
   geo.rotateX(-Math.PI / 2);   // (x, sever) -> (x, nahoru, -sever)
   // skupina 0 = střecha/podlaha, skupina 1 = stěny
-  scene.add(new THREE.Mesh(geo, [roofMat(st.roof), wallMat(st.tex, st.color)]));
+  scene.add(new THREE.Mesh(geo, [roofMat(st.roof), wallMat(st.tex, st.color, st.fh)]));
   if (st.pitched && st.lv <= 5) addPitchedRoof(ring, st, h);
-  // kolize (OD Forum je průchozí – má pasáže, takže bez kolize)
-  if (p.shop !== 'mall') {
-    const xs = ring.map(q => q[0]), zs = ring.map(q => -q[1]);
-    colliders.push({
-      pts: ring.map(q => [q[0], -q[1]]),
-      minX: Math.min(...xs), maxX: Math.max(...xs), minZ: Math.min(...zs), maxZ: Math.max(...zs)
-    });
-  }
+  // každá budova je neprůchodná (výjimka: venkovní průchody pod domy)
+  const xs = ring.map(q => q[0]), zs = ring.map(q => -q[1]);
+  colliders.push({
+    pts: ring.map(q => [q[0], -q[1]]),
+    minX: Math.min(...xs), maxX: Math.max(...xs), minZ: Math.min(...zs), maxZ: Math.max(...zs)
+  });
 }
 
 function addFlatArea(f) {
@@ -452,7 +494,7 @@ function addFlatArea(f) {
   mapA.push(ring.map(q => [q[0], -q[1]]));
   const geo = new THREE.ShapeGeometry(new THREE.Shape(ring.map(q => new THREE.Vector2(q[0], q[1]))));
   geo.rotateX(-Math.PI / 2);
-  const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: GTEX.ped, side: THREE.DoubleSide }));
+  const m = new THREE.Mesh(geo, groundMat('ped'));
   m.position.y = 0.04;
   scene.add(m);
 }
@@ -465,7 +507,11 @@ function build(data) {
       else if (p.building) addBuilding(f);
       else if (p.highway === 'pedestrian') addFlatArea(f);
     } else if (g.type === 'LineString' && p.highway) {
-      if (p.location === 'indoor' || p.tunnel || p.footway === 'crossing' && false) continue;
+      if (p.tunnel === 'building_passage' || p.covered === 'building_passage') {
+        if (p.location !== 'indoor') { const q = g.coordinates.map(P); for (let i = 0; i < q.length - 1; i++) passages.push([q[i][0], -q[i][1], q[i + 1][0], -q[i + 1][1]]); }
+        continue;
+      }
+      if (p.location === 'indoor' || p.tunnel) continue;
       if (p.highway === 'tertiary_link' && p.access === 'no') continue;
       const w = WIDTH[p.highway]; if (!w) continue;
       let kind = KIND[p.highway];
@@ -484,12 +530,12 @@ function build(data) {
     const uv = new Float32Array(pos.length / 3 * 2);
     for (let i = 0, j = 0; i < pos.length; i += 3, j += 2) { uv[j] = pos[i]; uv[j + 1] = pos[i + 2]; }   // UV v metrech
     geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-    scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: GTEX[k], side: THREE.DoubleSide })));
+    scene.add(new THREE.Mesh(geo, groundMat(k)));
   }
 }
 
 // ---------- hráč ----------
-const EYE = 1.7;
+const EYE = 1.5;
 const start = P([15.05712, 50.76578]);
 const player = { x: start[0], z: -start[1] };
 let yaw = 0.83, pitch = 0;
@@ -497,7 +543,16 @@ const keys = {};
 addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'KeyM') zoomI = (zoomI + 1) % ZOOMS.length; });
 addEventListener('keyup', e => { keys[e.code] = false; });
 
+function nearPassage(x, z) {
+  for (const [ax, az, bx, bz] of passages) {
+    const vx = bx - ax, vz = bz - az, l2 = vx * vx + vz * vz || 1;
+    let u = ((x - ax) * vx + (z - az) * vz) / l2; u = Math.max(0, Math.min(1, u));
+    if (Math.hypot(x - (ax + u * vx), z - (az + u * vz)) < 1.8) return true;
+  }
+  return false;
+}
 function blockedAt(x, z) {
+  if (nearPassage(x, z)) return false;
   const r = 0.4, probes = [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]];
   for (const c of colliders) {
     if (x < c.minX - r || x > c.maxX + r || z < c.minZ - r || z > c.maxZ + r) continue;
