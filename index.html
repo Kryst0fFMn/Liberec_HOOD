@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fügnerka – procházka Libercem</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#b8c9d6;font-family:Georgia,"Times New Roman",serif}
+  canvas{display:block}
+  #ov{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(28,36,44,.78);color:#f3efe6;text-align:center;cursor:pointer}
+  #ov div{max-width:30rem;padding:2rem;line-height:1.5}
+  #ov h1{font-size:2.6rem;margin:0 0 .6rem;font-weight:normal;letter-spacing:.01em}
+  #ov p{margin:.4rem 0}
+  #ov .go{display:inline-block;margin-top:1rem;padding:.6rem 1.4rem;border:1px solid #f3efe6;border-radius:2px}
+  #hud{position:fixed;left:14px;top:12px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7);font-size:1rem;pointer-events:none}
+  #cross{position:fixed;left:50%;top:50%;width:4px;height:4px;margin:-2px;border-radius:50%;background:#fff;opacity:.7;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="hud">Načítám mapu…</div>
+<div id="cross"></div>
+<div id="ov"><div>
+  <h1>Fügnerka</h1>
+  <p>Liberec, v měřítku 1:1. Data z OpenStreetMap.</p>
+  <p>W A S D – chůze &nbsp; Shift – rychleji &nbsp; myš – rozhlížení &nbsp; Esc – pauza</p>
+  <p id="msg">Načítám data…</p>
+  <span class="go" id="go" style="display:none">Klikni a jdi</span>
+</div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ---------- souřadnice: střed mapy = Fügnerova ----------
+const LON0 = 15.0573, LAT0 = 50.7657;
+const KX = 111320 * Math.cos(LAT0 * Math.PI / 180), KY = 110574;
+const P = c => [(c[0] - LON0) * KX, (c[1] - LAT0) * KY];   // [x východ, sever] v metrech
+
+// ---------- scéna ----------
+const scene = new THREE.Scene();
+const SKY = 0xb8c9d6;
+scene.background = new THREE.Color(SKY);
+scene.fog = new THREE.Fog(SKY, 120, 520);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 1200);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f86, 0.85));
+const sun = new THREE.DirectionalLight(0xfff2dd, 0.7);
+sun.position.set(-120, 200, 80);
+scene.add(sun);
+
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(4000, 4000),
+  new THREE.MeshLambertMaterial({ color: 0x9da294 })
+);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// ---------- pomocné ----------
+const colliders = [];   // {pts:[[x,z]...], minX,maxX,minZ,maxZ}
+const segs = [];        // pojmenované cesty pro HUD
+function hash(s) { let h = 0; for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); }
+function inPoly(x, z, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i][0], zi = pts[i][1], xj = pts[j][0], zj = pts[j][1];
+    if ((zi > z) !== (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+const WIDTH = { tertiary: 7, tertiary_link: 5, residential: 5.5, service: 3.5, living_street: 5, pedestrian: 6,
+                footway: 2.2, steps: 1.8, path: 1.6, cycleway: 2.5, platform: 2.5, track: 2.5 };
+const KIND = { tertiary: 'road', tertiary_link: 'road', residential: 'road', service: 'road', living_street: 'ped',
+               pedestrian: 'ped', footway: 'foot', steps: 'foot', path: 'foot', cycleway: 'foot', platform: 'foot', track: 'foot' };
+const STYLE = {
+  road: { color: 0x4a4d52, y: 0.03 },
+  ped:  { color: 0xc9bfae, y: 0.05 },
+  foot: { color: 0xb3a999, y: 0.07 },
+  fug:  { color: 0xd8b98a, y: 0.09 }      // Fügnerova zvýrazněná
+};
+const ribbons = { road: [], ped: [], foot: [], fug: [] };
+
+function addRibbon(coords, kind, width, name) {
+  const pts = coords.map(P);
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, an] = pts[i], [bx, bn] = pts[i + 1];
+    const dx = bx - ax, dn = bn - an, len = Math.hypot(dx, dn);
+    if (len < 0.01) continue;
+    const nx = -dn / len * width / 2, nn = dx / len * width / 2;
+    const y = STYLE[kind].y, arr = ribbons[kind];
+    const A = [ax + nx, y, -(an + nn)], B = [ax - nx, y, -(an - nn)];
+    const C = [bx + nx, y, -(bn + nn)], D = [bx - nx, y, -(bn - nn)];
+    arr.push(...A, ...B, ...C, ...B, ...D, ...C);
+    if (name) segs.push([ax, -an, bx, -bn, name]);
+  }
+}
+
+function addBuilding(f) {
+  const p = f.properties;
+  const ring = f.geometry.coordinates[0].slice(0, -1).map(P);
+  if (ring.length < 3) return;
+  const shape = new THREE.Shape(ring.map(q => new THREE.Vector2(q[0], q[1])));
+  let h;
+  if (p['building:levels']) h = parseFloat(p['building:levels']) * 3.2 + 1;
+  else if (p.building === 'garage') h = 3;
+  else if (p.building === 'construction') h = 14;
+  else h = 11;
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false });
+  geo.rotateX(-Math.PI / 2);   // (x, sever) -> (x, nahoru, -sever)
+  const hs = hash(p['@id']);
+  const tones = [0xd9cdb8, 0xcfc3ad, 0xe0d6c4, 0xbfb5a3, 0xd4b9a0, 0xc7c3b8, 0xe3dccb];
+  let color = tones[hs % tones.length];
+  if (p.heritage) color = 0xd8bf9a;
+  if (p.building === 'garage') color = 0xaaa79f;
+  if (p.shop === 'mall') color = 0xb9c2c9;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color }));
+  scene.add(mesh);
+  // kolize (OD Forum je průchozí – má pasáže, takže bez kolize)
+  if (p.shop !== 'mall') {
+    const xs = ring.map(q => q[0]), zs = ring.map(q => -q[1]);
+    colliders.push({
+      pts: ring.map(q => [q[0], -q[1]]),
+      minX: Math.min(...xs), maxX: Math.max(...xs), minZ: Math.min(...zs), maxZ: Math.max(...zs)
+    });
+  }
+}
+
+function addFlatArea(f) {
+  const ring = f.geometry.coordinates[0].slice(0, -1).map(P);
+  if (ring.length < 3) return;
+  const geo = new THREE.ShapeGeometry(new THREE.Shape(ring.map(q => new THREE.Vector2(q[0], q[1]))));
+  geo.rotateX(-Math.PI / 2);
+  const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0xc9bfae, side: THREE.DoubleSide }));
+  m.position.y = 0.04;
+  scene.add(m);
+}
+
+function build(data) {
+  for (const f of data.features) {
+    const p = f.properties, g = f.geometry;
+    if (g.type === 'Polygon') {
+      if (p.building) addBuilding(f);
+      else if (p.highway === 'pedestrian') addFlatArea(f);
+    } else if (g.type === 'LineString' && p.highway) {
+      if (p.location === 'indoor' || p.tunnel || p.footway === 'crossing' && false) continue;
+      if (p.highway === 'tertiary_link' && p.access === 'no') continue;
+      const w = WIDTH[p.highway]; if (!w) continue;
+      let kind = KIND[p.highway];
+      if (p.name === 'Fügnerova') kind = 'fug';
+      addRibbon(g.coordinates, kind, p.name === 'Fügnerova' ? Math.max(w, 5) : w, p.name);
+    }
+  }
+  for (const k in ribbons) {
+    if (!ribbons[k].length) continue;
+    const geo = new THREE.BufferGeometry();
+    const pos = new Float32Array(ribbons[k]);
+    const nrm = new Float32Array(pos.length);
+    for (let i = 1; i < nrm.length; i += 3) nrm[i] = 1;
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: STYLE[k].color, side: THREE.DoubleSide })));
+  }
+}
+
+// ---------- hráč ----------
+const EYE = 1.7;
+const start = P([15.05712, 50.76578]);
+const player = { x: start[0], z: -start[1] };
+let yaw = 0.83, pitch = 0;
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+function blockedAt(x, z) {
+  const r = 0.4, probes = [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]];
+  for (const c of colliders) {
+    if (x < c.minX - r || x > c.maxX + r || z < c.minZ - r || z > c.maxZ + r) continue;
+    for (const [ox, oz] of probes) if (inPoly(x + ox, z + oz, c.pts)) return true;
+  }
+  return false;
+}
+function move(dx, dz) {
+  const stuck = blockedAt(player.x, player.z);   // když začneme uvnitř budovy, nechej se vyjít ven
+  if (stuck || !blockedAt(player.x + dx, player.z + dz)) { player.x += dx; player.z += dz; return; }
+  if (!blockedAt(player.x + dx, player.z)) player.x += dx;
+  else if (!blockedAt(player.x, player.z + dz)) player.z += dz;
+}
+
+const ov = document.getElementById('ov'), hud = document.getElementById('hud');
+ov.addEventListener('click', () => { if (ready) renderer.domElement.requestPointerLock(); });
+document.addEventListener('pointerlockchange', () => {
+  ov.style.display = document.pointerLockElement ? 'none' : 'flex';
+});
+document.addEventListener('mousemove', e => {
+  if (!document.pointerLockElement) return;
+  yaw -= e.movementX * 0.0022;
+  pitch = Math.max(-1.45, Math.min(1.45, pitch - e.movementY * 0.0022));
+});
+
+let streetName = '', lastCheck = 0;
+function updateStreet(t) {
+  if (t - lastCheck < 400) return; lastCheck = t;
+  let best = 14, name = '';
+  for (const [ax, az, bx, bz, n] of segs) {
+    const vx = bx - ax, vz = bz - az, l2 = vx * vx + vz * vz || 1;
+    let u = ((player.x - ax) * vx + (player.z - az) * vz) / l2; u = Math.max(0, Math.min(1, u));
+    const d = Math.hypot(player.x - (ax + u * vx), player.z - (az + u * vz));
+    if (d < best) { best = d; name = n; }
+  }
+  streetName = name;
+  hud.textContent = name || '';
+}
+
+// ---------- smyčka ----------
+let ready = false, prev = performance.now();
+function loop(t) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((t - prev) / 1000, 0.1); prev = t;
+  if (ready && document.pointerLockElement) {
+    const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
+    const r = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+    if (f || r) {
+      const len = Math.hypot(f, r), sp = (keys.ShiftLeft || keys.ShiftRight ? 5 : 1.5) * dt / len;
+      move((-Math.sin(yaw) * f + Math.cos(yaw) * r) * sp, (-Math.cos(yaw) * f - Math.sin(yaw) * r) * sp);
+    }
+    updateStreet(t);
+  }
+  camera.position.set(player.x, EYE, player.z);
+  camera.rotation.set(pitch, yaw, 0, 'YXZ');
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(loop);
+
+// ---------- načtení dat ----------
+const msg = document.getElementById('msg');
+fetch('data.geojson')
+  .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+  .then(d => {
+    build(d);
+    ready = true;
+    msg.textContent = 'Mapa je načtená.';
+    document.getElementById('go').style.display = 'inline-block';
+    hud.textContent = '';
+  })
+  .catch(err => {
+    msg.textContent = 'Nepodařilo se načíst data.geojson (' + err.message + '). Soubor musí ležet vedle index.html a stránka musí běžet z webu (GitHub Pages) nebo z lokálního serveru.';
+  });
+</script>
+</body>
+</html>
